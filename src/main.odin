@@ -1,6 +1,18 @@
 package mush
+
+// DEBUG_MARK::false
+DEBUG_MARK :: true when ODIN_DEBUG else false // stops me from being unable to tell if I'm running the right thing
 prompt :: proc(buf: ^Buffer) {
 	buf_append(buf, "\r")
+	when DEBUG_MARK {
+		buf_append(buf, set_foreground(255, 0, 255))
+		buf_append(buf, "d")
+	}
+	if state.last_exit != 0 {
+		buf_append(buf, set_foreground(255, 0, 0))
+	} else {
+		buf_append(buf, set_foreground(0, 0, 255))
+	}
 	cwd, err := os.get_working_directory(context.temp_allocator)
 	if err != nil {
 		log.error("can't get current working directory:", err)
@@ -9,13 +21,18 @@ prompt :: proc(buf: ^Buffer) {
 		home := string(home_cstr)
 		if strings.starts_with(cwd, home) {
 			buf_append(buf, "~")
-
-			buf_append(buf, cwd[len(home) :])
-		}else{
+			buf_append(buf, cwd[len(home):])
+		} else {
 			buf_append(buf, cwd)
 		}
 	}
-	buf_append(buf, " > ")
+	buf_append(buf, " ")
+	if state.last_exit != 0 {
+		buf_append(buf, fmt.tprint(state.last_exit))
+	}
+	buf_append(buf, set_foreground(0, 255, 0))
+	buf_append(buf, "> ")
+	buf_append(buf, set_foreground(255, 255, 255))
 	state.need_prompt = false
 
 }
@@ -53,6 +70,10 @@ main :: proc() {
 
 	}
 	line := [dynamic]u8{}
+	arg_arena := virtual.Arena{}
+	arena_err := virtual.arena_init_growing(&arg_arena)
+	ensure(arena_err == nil, "Buy more ram!")
+	arg_allocator := virtual.arena_allocator(&arg_arena)
 	main_loop: for !state.should_close {
 		free_all(context.temp_allocator)
 		frame_buf := Buffer{}
@@ -71,6 +92,7 @@ main :: proc() {
 		}
 		status: i32 = 0
 		should_exec := false
+		// TODO: swap this whole guy with a tokenizer instead
 		input_loop: for ch, i in input {
 			switch ch {
 			case '\r':
@@ -78,6 +100,7 @@ main :: proc() {
 				should_exec = true
 				break input_loop
 			case:
+				// TODO: maybe only let nice characters into line
 				ch_str := [1]u8{ch}
 				buf_append(&frame_buf, string(ch_str[:]))
 				append(&line, ch)
@@ -85,7 +108,7 @@ main :: proc() {
 		}
 		write_stdout(string(frame_buf.buf[:frame_buf.off]))
 		if should_exec {
-			args := mush_get_args(line[:])
+			args := mush_get_args(line[:], arg_allocator)
 			err: Error
 			status, err = mush_execute(args)
 			clear(&line)
@@ -97,7 +120,8 @@ Buffer :: struct {
 	buf: []u8,
 	off: int,
 }
-mush_get_args :: proc(line: []u8) -> (args: [dynamic][]u8) {
+mush_get_args :: proc(line: []u8, allocator: runtime.Allocator) -> (args: [dynamic][]u8) {
+	args = make([dynamic][]u8, allocator)
 	Char_Set :: bit_set[cast(u8)0 ..= cast(u8)127]
 	Delim: Char_Set = {' ', '\t', '\r', '\a'}
 	offset := 0
@@ -141,12 +165,13 @@ mush_execute :: proc(args: [dynamic][]u8) -> (exit_code: i32, err: Error) {
 			os.exit(0)
 			//assert(ret == 0)
 		} else {
-			options := linux.Wait_Options{.WEXITED, .WNOHANG}
+			options := linux.Wait_Options{.WEXITED}
 			info: linux.Sig_Info
 			errno = .EINTR
 			for errno == .EINTR {
 				errno = linux.waitid(.PID, linux.Id(pid), &info, options + {.WNOWAIT}, nil)
 			}
+			state.last_exit = info.status
 			raw_modes()
 		}
 	}
@@ -241,6 +266,7 @@ State :: struct {
 	win_size:               [2]u16,
 	should_close:           bool,
 	need_prompt:            bool,
+	last_exit:              i32,
 }
 state := State {
 	stdin    = linux.STDIN_FILENO,
@@ -251,6 +277,7 @@ import "base:runtime"
 import "core:fmt"
 import "core:log"
 import "core:mem"
+import "core:mem/virtual"
 import "core:os"
 import "core:strconv"
 import "core:strings"
