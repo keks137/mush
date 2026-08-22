@@ -9,9 +9,10 @@ prompt :: proc(buf: ^Buffer) {
 		buf_append(buf, "d")
 	}
 	if state.last_exit != 0 {
-		buf_append(buf, set_foreground(255, 0, 0))
+		buf_append(buf, set_foreground(252, 25, 17))
 	} else {
-		buf_append(buf, set_foreground(0, 0, 255))
+		// buf_append(buf, set_foreground(31, 26, 248))
+		buf_append(buf, set_foreground(53, 109, 247))
 	}
 	cwd, err := os.get_working_directory(context.temp_allocator)
 	if err != nil {
@@ -34,7 +35,9 @@ prompt :: proc(buf: ^Buffer) {
 	buf_append(buf, "> ")
 	buf_append(buf, set_foreground(255, 255, 255))
 	state.need_prompt = false
-
+}
+ctrl_key :: proc(ch: u8) -> u8 {
+	return ch & 0x1f
 }
 main :: proc() {
 	when ODIN_DEBUG {
@@ -70,6 +73,7 @@ main :: proc() {
 
 	}
 	line := [dynamic]u8{}
+	defer delete(line)
 	arg_arena := virtual.Arena{}
 	arena_err := virtual.arena_init_growing(&arg_arena)
 	ensure(arena_err == nil, "Buy more ram!")
@@ -90,7 +94,6 @@ main :: proc() {
 		if !ok {
 			break
 		}
-		status: i32 = 0
 		should_exec := false
 		// TODO: swap this whole guy with a tokenizer instead
 		input_loop: for ch, i in input {
@@ -100,17 +103,29 @@ main :: proc() {
 				should_exec = true
 				break input_loop
 			case:
-				// TODO: maybe only let nice characters into line
-				ch_str := [1]u8{ch}
-				buf_append(&frame_buf, string(ch_str[:]))
-				append(&line, ch)
+				if ch == ctrl_key('d') {
+					if len(line) == 0 {
+						state.should_close = true
+						buf_append(&frame_buf, "\r\n")
+					}
+				} else if ch == ctrl_key('c') {
+					state.last_exit = 130
+					clear(&line)
+					state.need_prompt = true
+					buf_append(&frame_buf, "\r\n")
+				} else {
+					// TODO: maybe only let nice characters into line
+					ch_str := [1]u8{ch}
+					buf_append(&frame_buf, string(ch_str[:]))
+					append(&line, ch)
+				}
 			}
 		}
 		write_stdout(string(frame_buf.buf[:frame_buf.off]))
 		if should_exec {
 			args := mush_get_args(line[:], arg_allocator)
 			err: Error
-			status, err = mush_execute(args)
+			err = mush_execute(args)
 			clear(&line)
 			state.need_prompt = true
 		}
@@ -142,7 +157,7 @@ Error :: enum {
 	None,
 }
 @(require_results)
-mush_execute :: proc(args: [dynamic][]u8) -> (exit_code: i32, err: Error) {
+mush_execute :: proc(args: [dynamic][]u8) -> (err: Error) {
 	if len(args) == 0 {
 		return
 	} else if string(args[0]) == "cd" {
