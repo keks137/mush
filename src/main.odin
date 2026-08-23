@@ -96,12 +96,19 @@ main :: proc() {
 		}
 		should_exec := false
 		// TODO: swap this whole guy with a tokenizer instead
-		input_loop: for ch, i in input {
+		input_loop: for i := 0; i < len(input); i += 1 {
+			ch := input[i]
 			switch ch {
 			case '\r':
 				buf_append(&frame_buf, "\r\n")
 				should_exec = true
 				break input_loop
+			case '\b', '\x7f':
+				if len(line) > 0 {
+					pop(&line)
+					buf_append(&frame_buf, "\b \b")
+				}
+			case '\e':
 			case:
 				if ch == ctrl_key('d') {
 					if len(line) == 0 {
@@ -274,7 +281,7 @@ State :: struct {
 	stdin_flags:            linux.Open_Flags,
 	stdout:                 linux.Fd,
 	stdout_initial_termios: posix.termios,
-	// Buffer for incomplete UTF-8 sequences (max 4 bytes needed)
+	cursor_offset:          int,
 	inject_resize:          bool,
 	utf8_buf:               [4]u8,
 	utf8_len:               int,
