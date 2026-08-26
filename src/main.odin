@@ -399,8 +399,17 @@ mush_execute :: proc(args: [dynamic][]u8) -> (err: Error) {
 				}
 				path := string(path_cstr)
 				entries := strings.split(path, ":")
-				fmt.println(entries)
-
+				for entry in entries {
+					potential_path := strings.concatenate(
+						{entry, "/", string(args[0]), "\x00"},
+						context.temp_allocator,
+					)
+					potential_path_cstr := transmute(cstring)raw_data(potential_path)
+					if linux.access(potential_path_cstr) == nil {
+						executable = potential_path_cstr
+						break
+					}
+				}
 			}
 			ret := linux.execve(executable, argc, posix.environ)
 			if ret != nil {
