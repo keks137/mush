@@ -1,5 +1,10 @@
 package mush
-
+set_green :: proc(buf: ^Buffer) {
+	buf_append(buf, set_foreground(0, 255, 0))
+}
+set_red :: proc(buf: ^Buffer) {
+	buf_append(buf, set_foreground(252, 25, 17))
+}
 // DEBUG_MARK::false
 DEBUG_MARK :: true when ODIN_DEBUG else false // stops me from being unable to tell if I'm running the right thing
 prompt :: proc(buf: ^Buffer) {
@@ -10,7 +15,7 @@ prompt :: proc(buf: ^Buffer) {
 		buf_append(buf, "d")
 	}
 	if state.last_exit != 0 {
-		buf_append(buf, set_foreground(252, 25, 17))
+		set_red(buf)
 	} else {
 		// buf_append(buf, set_foreground(31, 26, 248))
 		buf_append(buf, set_foreground(53, 109, 247))
@@ -32,7 +37,7 @@ prompt :: proc(buf: ^Buffer) {
 	if state.last_exit != 0 {
 		buf_append(buf, fmt.tprint(state.last_exit))
 	}
-	buf_append(buf, set_foreground(0, 255, 0))
+	set_green(buf)
 	buf_append(buf, "> ")
 	buf_append(buf, set_foreground(255, 255, 255))
 }
@@ -233,6 +238,7 @@ main :: proc() {
 		if !ok {
 			break
 		}
+		should_cancel := false
 		if len(input) > 0 {
 			{
 				tmp := in_buf
@@ -278,8 +284,8 @@ main :: proc() {
 						}
 					} else if ch == ctrl_key('c') {
 						state.last_exit = 130
-						clear(in_buf)
-						buf_append(&frame_buf, "\r\n")
+						should_cancel = true
+						inject_at(processed_buf, state.cursor_offset, '\n')
 					} else {
 						inject_at(processed_buf, state.cursor_offset, ch)
 						state.cursor_offset += 1
@@ -301,7 +307,12 @@ main :: proc() {
 		}
 		args, should_exec := parse_args(exec_args, &frame_buf, arg_allocator)
 		write_stdout(string(frame_buf.buf[:frame_buf.off]))
-		if should_exec {
+		if should_cancel {
+			clear(in_buf)
+			clear(processed_buf)
+			state.cursor_offset = 0
+			exec_args = {}
+		} else if should_exec {
 			err: Error
 			err = mush_execute(args)
 			clear(in_buf)
@@ -323,26 +334,72 @@ parse_args :: proc(
 	args: [dynamic][]u8,
 	should_exec: bool,
 ) {
-	args = make([dynamic][]u8, allocator)
-	for tok, i in toks {
-		switch tok.kind {
+	if len(toks) > 0 {
+		args = make([dynamic][]u8, allocator)
+		cmd := toks[0]
+		toks := toks[1:]
+		#partial switch cmd.kind {
+		case .Word:
+			set_red(frame_buf)
+			_, found := get_builtin(string(cmd.word))
+			if !found {
+				_, patherr := filepath.abs(string(cmd.word))
+				found = patherr == nil
+			}
+			if !found {
+				path_cstr := posix.getenv("PATH")
+				if path_cstr == nil {
+					path_cstr = "/bin:/usr/bin"
+				}
+				path := string(path_cstr)
+				entries := strings.split(path, ":", context.temp_allocator)
+				for entry in entries {
+					potential_path := strings.concatenate(
+						{entry, "/", string(cmd.word), "\x00"},
+						context.temp_allocator,
+					)
+					potential_path_cstr := transmute(cstring)raw_data(potential_path)
+					if linux.access(potential_path_cstr) == nil {
+						found = true
+						break
+					}
+				}
+			}
+			if found {
+				set_green(frame_buf)
+			}
+			buf_append(frame_buf, string(cmd.word))
+			buf_append(frame_buf, " ")
+			append(&args, cmd.word)
+			buf_append(frame_buf, set_foreground(255, 255, 255))
+			for tok, i in toks {
+				switch tok.kind {
+				case .Newline:
+					buf_append(frame_buf, "\r\n")
+					should_exec = true
+				case .String:
+					buf_append(frame_buf, string(tok.word))
+					append(&args, tok.word[1:len(tok.word) - 1]) // remove quotes
+					buf_append(frame_buf, " ")
+				case .Word:
+					buf_append(frame_buf, string(tok.word))
+					buf_append(frame_buf, " ")
+					append(&args, tok.word)
+				case .EOF:
+					assert(i == len(toks) - 1)
+				case .Invalid, .ArrowLeft, .ArrowRight, .ArrowUp, .ArrowDown, .Backspace:
+					fmt.eprintln(tok)
+					ensure(false, "aaaaa")
+				}
+			}
+
+		case .EOF:
+			assert(len(toks) == 0)
 		case .Newline:
 			buf_append(frame_buf, "\r\n")
 			should_exec = true
-		case .String:
-			buf_append(frame_buf, string(tok.word))
-			append(&args, tok.word[1:len(tok.word) - 1]) // remove quotes
-			buf_append(frame_buf, " ")
-		case .Word:
-			buf_append(frame_buf, string(tok.word))
-			buf_append(frame_buf, " ")
-			append(&args, tok.word)
-		case .EOF:
-			assert(i == len(toks) - 1)
-			break
-		case .Invalid, .ArrowLeft, .ArrowRight, .ArrowUp, .ArrowDown, .Backspace:
-			fmt.eprintln(tok)
-			ensure(false, "aaaaa")
+		case:
+			fmt.eprintln("Not a command:", cmd)
 		}
 	}
 	return
@@ -364,18 +421,38 @@ mush_get_args :: proc(line: []u8, allocator: runtime.Allocator) -> (args: [dynam
 	return
 }
 
-
+BuiltinCommand :: enum {
+	Cd,
+	Exit,
+}
+builtin_commands := [BuiltinCommand]string {
+	.Cd   = "cd",
+	.Exit = "exit",
+}
 Error :: enum {
 	None,
+}
+get_builtin :: proc(cmd: string) -> (builtin_cmd: BuiltinCommand, ok: bool) {
+	for i in BuiltinCommand(0) ..< max(BuiltinCommand) {
+		builtin_cmd = i
+		if cmd == builtin_commands[i] {
+			ok = true
+			break
+		}
+	}
+	return
 }
 @(require_results)
 mush_execute :: proc(args: [dynamic][]u8) -> (err: Error) {
 	if len(args) == 0 {
 		return
-	} else if string(args[0]) == "cd" {
-		mush_cd(args)
-	} else if string(args[0]) == "exit" {
-		state.should_close = true
+	} else if cmd, ok := get_builtin(string(args[0])); ok {
+		switch cmd {
+		case .Exit:
+			state.should_close = true
+		case .Cd:
+			mush_cd(args)
+		}
 	} else {
 		restore_modes()
 		pid, errno := linux.fork()
@@ -398,7 +475,7 @@ mush_execute :: proc(args: [dynamic][]u8) -> (err: Error) {
 					path_cstr = "/bin:/usr/bin"
 				}
 				path := string(path_cstr)
-				entries := strings.split(path, ":")
+				entries := strings.split(path, ":", context.temp_allocator)
 				for entry in entries {
 					potential_path := strings.concatenate(
 						{entry, "/", string(args[0]), "\x00"},
