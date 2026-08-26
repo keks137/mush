@@ -181,6 +181,7 @@ next_rune :: proc(t: ^Tokenizer) -> rune {
 
 PROFILING :: true
 when PROFILING {
+	SCOPED_EVENT :: spall.SCOPED_EVENT
 	spall_ctx: spall.Context
 	@(thread_local)
 	spall_buffer: spall.Buffer
@@ -227,7 +228,7 @@ main :: proc() {
 		spall_buffer = spall.buffer_create(buffer_backing, u32(sync.current_thread_id()))
 		defer spall.buffer_destroy(&spall_ctx, &spall_buffer)
 
-		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
+		SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
 	}
 	logger := log.create_console_logger()
 	context.logger = logger
@@ -262,7 +263,7 @@ main :: proc() {
 	ensure(arena_err == nil, "Buy more ram!")
 	arg_allocator := virtual.arena_allocator(&arg_arena)
 	main_loop: for !state.should_close {
-		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, "cycle")
+		SCOPED_EVENT(&spall_ctx, &spall_buffer, "cycle")
 		free_all(context.temp_allocator)
 		frame_buf := Buffer{}
 		{
@@ -274,13 +275,13 @@ main :: proc() {
 			state.win_size = get_window_size()
 		}
 		prompt(&frame_buf)
-		input, ok := read_stdin(time.Millisecond * 16)
+		input, ok := read_stdin(time.Second * 3)
 		if !ok {
 			break
 		}
 		should_cancel := false
 		if len(input) > 0 {
-			spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, "input handling")
+			SCOPED_EVENT(&spall_ctx, &spall_buffer, "input handling")
 			{
 				tmp := in_buf
 				in_buf = processed_buf
@@ -292,7 +293,7 @@ main :: proc() {
 			append(in_buf, ..input[:])
 			state.cursor_offset = 0
 			edit_loop: for i := 0; i < len(in_buf); i += 1 {
-				spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, "edit_loop")
+				SCOPED_EVENT(&spall_ctx, &spall_buffer, "edit_loop")
 				ch := in_buf[i]
 				switch ch {
 				case '\b', '\x7f':

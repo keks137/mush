@@ -17,6 +17,7 @@ read_stdin :: proc(
 		state.utf8_len = 0
 	}
 	loop: for {
+		SCOPED_EVENT(&spall_ctx, &spall_buffer, "read cycle")
 		buf_rest := byte_buf[buf.off:len(buf.buf)]
 		beg := time.now()
 		pollfd := linux.Poll_Fd {
@@ -53,6 +54,7 @@ read_stdin :: proc(
 			}
 		}
 	}
+	SCOPED_EVENT(&spall_ctx, &spall_buffer, "UTF8 stuff")
 	if buf.off > 0 {
 		lim := max(buf.off - 3, 0)
 		off := buf.off - 1
