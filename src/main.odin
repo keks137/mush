@@ -57,6 +57,7 @@ TokenKind :: enum {
 	Backspace,
 	Newline,
 	String,
+	UnterminatedString,
 	EOF,
 }
 Pos :: struct {
@@ -118,22 +119,23 @@ get_token :: proc(s: ^Tokenizer) -> Token {
 			next_rune(s)
 		}
 	case '"':
-		tok.kind = .String
+		tok.kind = .UnterminatedString
 		for s.offset < len(s.src) {
 			char := s.ch
 			if char == '\n' || char < 0 || (s.offset == len(s.src) - 1 && char != '"') {
-				syntax_error(s, tok.pos, "string literal not terminated")
 				break
 			}
 			next_rune(s)
 			if char == '"' {
+				tok.kind = .String
 				break
 			}
 			if char == '\\' {
 				// TODO:
 			}
 		}
-	case 'A' ..= 'Z', 'a' ..= 'z', '_', '.', '/', '-', '~':
+	//case 'A' ..= 'Z', 'a' ..= 'z', '_', '.', '/', '-', '~':
+	case:
 		tok.kind = .Word
 		ident_loop: for s.offset < len(s.src) {
 			switch s.ch {
@@ -144,14 +146,6 @@ get_token :: proc(s: ^Tokenizer) -> Token {
 			}
 		}
 		str := s.src[tok.offset:s.offset]
-	// for keyword in TokenKind.And ..< TokenKind(len(TokenKind)) {
-	// 	if token_kind_string[keyword] == str {
-	// 		tok.kind = keyword
-	// 		break
-	// 	}
-	// }
-	case:
-		syntax_error(s, tok.pos, "Unexpected character: '%c', code %x", ch, ch)
 	}
 
 	tok.word = s.src[tok.offset:s.offset]
@@ -413,7 +407,6 @@ parse_args :: proc(
 				set_green(frame_buf)
 			}
 			buf_append(frame_buf, string(cmd.word))
-			buf_append(frame_buf, " ")
 			append(&args, cmd.word)
 			buf_append(frame_buf, set_foreground(255, 255, 255))
 			for tok, i in toks {
@@ -421,13 +414,17 @@ parse_args :: proc(
 				case .Newline:
 					buf_append(frame_buf, "\r\n")
 					should_exec = true
+				case .UnterminatedString:
+					buf_append(frame_buf, " ")
+					buf_append(frame_buf, string(tok.word))
+					append(&args, tok.word[1:]) // remove quote
 				case .String:
+					buf_append(frame_buf, " ")
 					buf_append(frame_buf, string(tok.word))
 					append(&args, tok.word[1:len(tok.word) - 1]) // remove quotes
-					buf_append(frame_buf, " ")
 				case .Word:
-					buf_append(frame_buf, string(tok.word))
 					buf_append(frame_buf, " ")
+					buf_append(frame_buf, string(tok.word))
 					append(&args, tok.word)
 				case .EOF:
 					assert(i == len(toks) - 1)
