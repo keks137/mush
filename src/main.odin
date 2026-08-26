@@ -12,14 +12,13 @@ prompt :: proc(buf: ^Buffer) {
 	// buf_append(buf, "\r")
 	buf_append(buf, "\r\x1b[2K")
 	when DEBUG_MARK {
-		buf_append(buf, set_foreground(255, 0, 255))
+		buf_append(buf, ansi.CSI + ansi.FG_COLOR_24_BIT + ";255;0;255" + ansi.SGR)
 		buf_append(buf, "d")
 	}
 	if state.last_exit != 0 {
 		set_red(buf)
 	} else {
-		// buf_append(buf, set_foreground(31, 26, 248))
-		buf_append(buf, set_foreground(53, 109, 247))
+		buf_append(buf, ansi.CSI + ansi.FG_COLOR_24_BIT + ";53;109;247" + ansi.SGR)
 	}
 	cwd, err := os.get_working_directory(context.temp_allocator)
 	if err != nil {
@@ -43,7 +42,7 @@ prompt :: proc(buf: ^Buffer) {
 	}
 	set_green(buf)
 	buf_append(buf, "> ")
-	buf_append(buf, set_foreground(255, 255, 255))
+	buf_append(buf, ansi.CSI + ansi.FG_COLOR_24_BIT + ";255;255;255" + ansi.SGR)
 }
 ctrl_key :: proc(ch: u8) -> u8 {
 	return ch & 0x1f
