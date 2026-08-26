@@ -3,7 +3,8 @@ package mush
 // DEBUG_MARK::false
 DEBUG_MARK :: true when ODIN_DEBUG else false // stops me from being unable to tell if I'm running the right thing
 prompt :: proc(buf: ^Buffer) {
-	buf_append(buf, "\r")
+	// buf_append(buf, "\r")
+	buf_append(buf, "\r\x1b[2K")
 	when DEBUG_MARK {
 		buf_append(buf, set_foreground(255, 0, 255))
 		buf_append(buf, "d")
@@ -34,11 +35,141 @@ prompt :: proc(buf: ^Buffer) {
 	buf_append(buf, set_foreground(0, 255, 0))
 	buf_append(buf, "> ")
 	buf_append(buf, set_foreground(255, 255, 255))
-	state.need_prompt = false
 }
 ctrl_key :: proc(ch: u8) -> u8 {
 	return ch & 0x1f
 }
+TokenKind :: enum {
+	Invalid,
+	Word,
+	ArrowLeft,
+	ArrowRight,
+	ArrowUp,
+	ArrowDown,
+	Backspace,
+	Newline,
+	String,
+	EOF,
+}
+Pos :: struct {
+	offset: int,
+}
+Token :: struct {
+	kind:      TokenKind,
+	using pos: Pos,
+	word:      []u8,
+}
+Tokenizer :: struct {
+	using pos:        Pos,
+	prev:             Token,
+	current:          Token,
+	curr_line_offset: int,
+	ch:               rune,
+	w:                int,
+	src:              []u8,
+	filename:         string,
+}
+get_token :: proc(s: ^Tokenizer) -> Token {
+	skip_whitespace :: proc(s: ^Tokenizer) -> rune {
+		for s.offset < len(s.src) {
+			switch s.ch {
+			case ' ', '\t', '\f', '\v':
+				next_rune(s)
+			case:
+				return s.ch
+			}
+		}
+		return s.ch
+	}
+	skip_digits :: proc(s: ^Tokenizer) {
+		for s.offset < len(s.src) {
+			switch s.ch {
+			case '0' ..= '9':
+				next_rune(s)
+			case:
+				return
+			}
+		}
+	}
+
+	skip_whitespace(s)
+	tok := Token{}
+	tok.pos = s.pos
+	ch := s.ch
+	next_rune(s)
+	switch ch {
+	case utf8.RUNE_ERROR:
+		syntax_error(s, tok.pos, "illegal character found: %c", ch)
+	case utf8.RUNE_EOF, '\x00':
+		tok.kind = .EOF
+	case '\n':
+		tok.kind = .Newline
+	case '\r':
+		tok.kind = .Newline
+		if s.ch == '\n' {
+			next_rune(s)
+		}
+	case '"':
+		tok.kind = .String
+		for s.offset < len(s.src) {
+			char := s.ch
+			if char == '\n' || char < 0 || (s.offset == len(s.src) - 1 && char != '"') {
+				syntax_error(s, tok.pos, "string literal not terminated")
+				break
+			}
+			next_rune(s)
+			if char == '"' {
+				break
+			}
+			if char == '\\' {
+				// TODO:
+			}
+		}
+	case 'A' ..= 'Z', 'a' ..= 'z', '_', '.', '/', '-':
+		tok.kind = .Word
+		ident_loop: for s.offset < len(s.src) {
+			switch s.ch {
+			case ' ', '\t', '\r', '\f', '\v':
+				break ident_loop
+			case:
+				next_rune(s)
+			}
+		}
+		str := s.src[tok.offset:s.offset]
+	// for keyword in TokenKind.And ..< TokenKind(len(TokenKind)) {
+	// 	if token_kind_string[keyword] == str {
+	// 		tok.kind = keyword
+	// 		break
+	// 	}
+	// }
+	case:
+		syntax_error(s, tok.pos, "Unexpected character: '%c', code %x", ch, ch)
+	}
+
+	tok.word = s.src[tok.offset:s.offset]
+	return tok
+}
+syntax_error :: proc(t: ^Tokenizer, pos: Pos, format: string, args: ..any) {
+	fmt.eprintf("%s:", t.filename)
+	fmt.eprintf("%d:%d Syntax Error: ")
+	fmt.eprintf(format, args = args)
+	fmt.eprintln()
+	error_count += 1
+}
+next_rune :: proc(t: ^Tokenizer) -> rune {
+	if t.offset < len(t.src) {
+		t.offset += t.w
+		t.ch, t.w = utf8.decode_rune_in_string(string(t.src[t.offset:]))
+		// scanner.pos.column = scanner.offset - scanner.curr_line_offset
+	}
+
+	if t.offset >= len(t.src) {
+		t.ch = utf8.RUNE_EOF
+		t.w = 1
+	}
+	return t.ch
+}
+error_count := 0
 main :: proc() {
 	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator
@@ -68,12 +199,20 @@ main :: proc() {
 		frame_buf := Buffer{}
 		frame_buf.buf = make([]u8, 256 * mem.Kilobyte)
 		defer delete(frame_buf.buf)
+		buf_append(&frame_buf, ansi.CSI + ansi.DECTCEM_HIDE)
 		prompt(&frame_buf)
 		write_stdout(string(frame_buf.buf[:frame_buf.off]))
 
 	}
-	line := [dynamic]u8{}
-	defer delete(line)
+	t := Tokenizer{}
+	line_bufs := [2][dynamic]u8{}
+	in_buf := &line_bufs[0]
+	processed_buf := &line_bufs[1]
+	defer delete(line_bufs[0])
+	defer delete(line_bufs[1])
+	exec_args: []Token
+	line_tokens := [dynamic]Token{}
+	defer delete(line_tokens)
 	arg_arena := virtual.Arena{}
 	arena_err := virtual.arena_init_growing(&arg_arena)
 	ensure(arena_err == nil, "Buy more ram!")
@@ -89,58 +228,124 @@ main :: proc() {
 			state.inject_resize = false
 			state.win_size = get_window_size()
 		}
-		if state.need_prompt {prompt(&frame_buf)}
+		prompt(&frame_buf)
 		input, ok := read_stdin(time.Millisecond * 16)
 		if !ok {
 			break
 		}
-		should_exec := false
-		// TODO: swap this whole guy with a tokenizer instead
-		input_loop: for i := 0; i < len(input); i += 1 {
-			ch := input[i]
-			switch ch {
-			case '\r':
-				buf_append(&frame_buf, "\r\n")
-				should_exec = true
-				break input_loop
-			case '\b', '\x7f':
-				if len(line) > 0 {
-					pop(&line)
-					buf_append(&frame_buf, "\b \b")
-				}
-			case '\e':
-			case:
-				if ch == ctrl_key('d') {
-					if len(line) == 0 {
-						state.should_close = true
-						buf_append(&frame_buf, "\r\n")
+		if len(input) > 0 {
+			{
+				tmp := in_buf
+				in_buf = processed_buf
+				processed_buf = tmp
+			}
+			assert(in_buf != processed_buf)
+			clear(&line_tokens)
+			clear(processed_buf)
+			append(in_buf, ..input[:])
+			state.cursor_offset = 0
+			edit_loop: for i := 0; i < len(in_buf); i += 1 {
+				ch := in_buf[i]
+				switch ch {
+				case '\b', '\x7f':
+					if state.cursor_offset > 0 {
+						state.cursor_offset -= 1
+						ordered_remove(processed_buf, state.cursor_offset)
 					}
-				} else if ch == ctrl_key('c') {
-					state.last_exit = 130
-					clear(&line)
-					state.need_prompt = true
-					buf_append(&frame_buf, "\r\n")
-				} else {
-					// TODO: maybe only let nice characters into line
-					ch_str := [1]u8{ch}
-					buf_append(&frame_buf, string(ch_str[:]))
-					append(&line, ch)
+				case '\e':
+					if (len(in_buf) > i + 1) {
+						i += 1
+						ch = in_buf[i]
+						if ch == '[' {
+							if (len(in_buf) > i + 1) {
+								i += 1
+								ch = in_buf[i]
+								switch ch {
+								case 'D':
+									//left
+									if state.cursor_offset > 0 {
+										state.cursor_offset -= 1
+									}
+								}
+							}
+						}
+					}
+				case:
+					if ch == ctrl_key('d') {
+						if len(processed_buf) == 0 {
+							state.should_close = true
+							buf_append(&frame_buf, "\r\n")
+						}
+					} else if ch == ctrl_key('c') {
+						state.last_exit = 130
+						clear(in_buf)
+						buf_append(&frame_buf, "\r\n")
+					} else {
+						inject_at(processed_buf, state.cursor_offset, ch)
+						state.cursor_offset += 1
+					}
 				}
 			}
+			t = {}
+			t.src = processed_buf[:]
+			next_rune(&t)
+			for {
+				tok := get_token(&t)
+				append(&line_tokens, tok)
+				if tok.kind == .EOF {break}
+			}
+			exec_args = line_tokens[:]
+			// fmt.println("\rin_buf:", in_buf)
+			// fmt.println("\rprocessed_buf:", processed_buf)
+			// fmt.println("\rline_tokens:", line_tokens)
 		}
+		args, should_exec := parse_args(exec_args, &frame_buf, arg_allocator)
 		write_stdout(string(frame_buf.buf[:frame_buf.off]))
 		if should_exec {
-			args := mush_get_args(line[:], arg_allocator)
 			err: Error
 			err = mush_execute(args)
-			clear(&line)
-			state.need_prompt = true
+			clear(in_buf)
+			clear(processed_buf)
+			state.cursor_offset = 0
+			exec_args = {}
 		}
 	}
 }
 Buffer :: struct {
 	buf: []u8,
 	off: int,
+}
+parse_args :: proc(
+	toks: []Token,
+	frame_buf: ^Buffer,
+	allocator: runtime.Allocator,
+) -> (
+	args: [dynamic][]u8,
+	should_exec: bool,
+) {
+	args = make([dynamic][]u8, allocator)
+	for tok, i in toks {
+		switch tok.kind {
+		case .Newline:
+			buf_append(frame_buf, "\r\n")
+			should_exec = true
+		case .String:
+			buf_append(frame_buf, string(tok.word))
+			append(&args, tok.word[1:len(tok.word) - 1]) // remove quotes
+			buf_append(frame_buf, " ")
+		case .Word:
+			buf_append(frame_buf, string(tok.word))
+			buf_append(frame_buf, " ")
+			append(&args, tok.word)
+		case .EOF:
+			assert(i == len(toks) - 1)
+			break
+		case .Invalid, .ArrowLeft, .ArrowRight, .ArrowUp, .ArrowDown, .Backspace:
+			fmt.eprintln(tok)
+			ensure(false, "aaaaa")
+		}
+	}
+	return
 }
 mush_get_args :: proc(line: []u8, allocator: runtime.Allocator) -> (args: [dynamic][]u8) {
 	args = make([dynamic][]u8, allocator)
@@ -195,6 +400,7 @@ mush_execute :: proc(args: [dynamic][]u8) -> (err: Error) {
 			}
 			state.last_exit = info.status
 			raw_modes()
+			write_stdout(ansi.CSI + ansi.DECTCEM_HIDE)
 		}
 	}
 	return
@@ -266,6 +472,7 @@ set_background :: proc(r: u8, g: u8, b: u8) -> string {
 	return fmt.tprint(ansi.CSI, ansi.BG_COLOR_24_BIT, ";", r, ";", g, ";", b, ansi.SGR, sep = "")
 }
 buf_append :: proc(buf: ^Buffer, str: string) -> (count: int, ok: bool) {
+	// fmt.printfln("appending %w\r", str)
 	str := transmute([]u8)str
 	left := len(buf.buf) - buf.off
 	can_do := max(min(left, len(str)), 0)
@@ -287,7 +494,6 @@ State :: struct {
 	utf8_len:               int,
 	win_size:               [2]u16,
 	should_close:           bool,
-	need_prompt:            bool,
 	last_exit:              i32,
 }
 state := State {
@@ -308,3 +514,4 @@ import "core:sys/posix"
 import "core:terminal"
 import "core:terminal/ansi"
 import "core:time"
+import "core:unicode/utf8"
