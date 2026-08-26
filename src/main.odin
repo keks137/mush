@@ -28,7 +28,10 @@ prompt :: proc(buf: ^Buffer) {
 		home := string(home_cstr)
 		if strings.starts_with(cwd, home) {
 			buf_append(buf, "~")
-			buf_append(buf, cwd[len(home):])
+			pretty_name := cwd[len(home):]
+			if len(pretty_name) > 0 {
+				buf_append(buf, pretty_name)
+			}
 		} else {
 			buf_append(buf, cwd)
 		}
@@ -155,8 +158,7 @@ get_token :: proc(s: ^Tokenizer) -> Token {
 	return tok
 }
 syntax_error :: proc(t: ^Tokenizer, pos: Pos, format: string, args: ..any) {
-	fmt.eprintf("%s:", t.filename)
-	fmt.eprintf("%d:%d Syntax Error: ")
+	fmt.eprintf("Syntax Error: ")
 	fmt.eprintf(format, args = args)
 	fmt.eprintln()
 	error_count += 1
@@ -343,8 +345,10 @@ parse_args :: proc(
 			set_red(frame_buf)
 			_, found := get_builtin(string(cmd.word))
 			if !found {
-				_, patherr := filepath.abs(string(cmd.word))
-				found = patherr == nil
+				if cmd.word[0] == '.' {
+					_, patherr := filepath.abs(string(cmd.word), context.temp_allocator)
+					found = patherr == nil
+				}
 			}
 			if !found {
 				path_cstr := posix.getenv("PATH")
@@ -400,6 +404,7 @@ parse_args :: proc(
 			should_exec = true
 		case:
 			fmt.eprintln("Not a command:", cmd)
+			state.last_exit = 1
 		}
 	}
 	return
@@ -466,9 +471,12 @@ mush_execute :: proc(args: [dynamic][]u8) -> (err: Error) {
 			}
 			executable := argc[0]
 			// restore_modes()
-			execpath, err_path := filepath.abs(string(args[0]))
-			if err_path == nil {
-				executable = strings.clone_to_cstring(execpath)
+
+			if args[0][0] == '.' {
+				execpath, err_path := filepath.abs(string(args[0]), context.temp_allocator)
+				if err_path == nil {
+					executable = strings.clone_to_cstring(execpath)
+				}
 			} else {
 				path_cstr := posix.getenv("PATH")
 				if path_cstr == nil {
