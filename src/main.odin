@@ -125,7 +125,7 @@ get_token :: proc(s: ^Tokenizer) -> Token {
 				// TODO:
 			}
 		}
-	case 'A' ..= 'Z', 'a' ..= 'z', '_', '.', '/', '-':
+	case 'A' ..= 'Z', 'a' ..= 'z', '_', '.', '/', '-', '~':
 		tok.kind = .Word
 		ident_loop: for s.offset < len(s.src) {
 			switch s.ch {
@@ -394,9 +394,14 @@ mush_execute :: proc(args: [dynamic][]u8) -> (err: Error) {
 				executable = strings.clone_to_cstring(execpath)
 			} else {
 				path_cstr := posix.getenv("PATH")
+				if path_cstr == nil {
+					path_cstr = "/bin:/usr/bin"
+				}
+				path := string(path_cstr)
+				entries := strings.split(path, ":")
+				fmt.println(entries)
+
 			}
-
-
 			ret := linux.execve(executable, argc, posix.environ)
 			if ret != nil {
 				fmt.eprintfln("Command not found: %s", args[0])
@@ -420,10 +425,29 @@ mush_execute :: proc(args: [dynamic][]u8) -> (err: Error) {
 mush_cd :: proc(args: [dynamic][]u8) {
 	if len(args) == 1 {
 		home := posix.getenv("HOME")
-		posix.chdir(home)
+		errno := linux.chdir(home)
+		if errno != nil {
+			fmt.eprintln("Can't cd to '", home, "', ", errno, sep = "")
+		}
 	} else {
-		_, argc := make_c_strings(args)
-		posix.chdir(cast(cstring)argc[1])
+		dst: cstring
+		if args[1][0] == '~' {
+			home_cstr := posix.getenv("HOME")
+			home := string(home_cstr)
+			length := len(args[1]) + len(home) - 1 // remove '~'
+			c := make([]byte, length + 1, context.temp_allocator)
+			copy(c, home[:])
+			rest := c[len(home):]
+			copy(rest, args[1][1:])
+			c[length] = 0
+			dst = cstring(&c[0])
+		} else {
+			dst = strings.clone_to_cstring(string(args[1]), context.temp_allocator)
+		}
+		errno := linux.chdir(dst)
+		if errno != nil {
+			fmt.eprintln("Can't cd to '", dst, "', ", errno, sep = "")
+		}
 	}
 }
 @(disabled = ODIN_DISABLE_ASSERT)
