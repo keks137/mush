@@ -1,9 +1,10 @@
 package mush
 set_green :: proc(buf: ^Buffer) {
-	buf_append(buf, set_foreground(0, 255, 0))
+	buf_append(buf, ansi.CSI + ansi.FG_COLOR_24_BIT + ";0;255;0" + ansi.SGR)
+
 }
 set_red :: proc(buf: ^Buffer) {
-	buf_append(buf, set_foreground(252, 25, 17))
+	buf_append(buf, ansi.CSI + ansi.FG_COLOR_24_BIT + ";252;25;17" + ansi.SGR)
 }
 // DEBUG_MARK::false
 DEBUG_MARK :: true when ODIN_DEBUG else false // stops me from being unable to tell if I'm running the right thing
@@ -176,6 +177,30 @@ next_rune :: proc(t: ^Tokenizer) -> rune {
 	}
 	return t.ch
 }
+
+
+PROFILING :: true
+when PROFILING {
+	spall_ctx: spall.Context
+	@(thread_local)
+	spall_buffer: spall.Buffer
+	@(instrumentation_enter)
+	spall_enter :: proc "contextless" (
+		proc_address, call_site_return_address: rawptr,
+		loc: runtime.Source_Code_Location,
+	) {
+		spall._buffer_begin(&spall_ctx, &spall_buffer, "", "", loc)
+	}
+
+	@(instrumentation_exit)
+	spall_exit :: proc "contextless" (
+		proc_address, call_site_return_address: rawptr,
+		loc: runtime.Source_Code_Location,
+	) {
+		spall._buffer_end(&spall_ctx, &spall_buffer)
+	}
+}
+
 error_count := 0
 main :: proc() {
 	when ODIN_DEBUG {
@@ -191,6 +216,18 @@ main :: proc() {
 			}
 			mem.tracking_allocator_destroy(&track)
 		}
+	}
+	when PROFILING {
+		spall_ctx = spall.context_create("trace_test.spall")
+		defer spall.context_destroy(&spall_ctx)
+
+		buffer_backing := make([]u8, spall.BUFFER_DEFAULT_SIZE)
+		defer delete(buffer_backing)
+
+		spall_buffer = spall.buffer_create(buffer_backing, u32(sync.current_thread_id()))
+		defer spall.buffer_destroy(&spall_ctx, &spall_buffer)
+
+		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, #procedure)
 	}
 	logger := log.create_console_logger()
 	context.logger = logger
@@ -225,6 +262,7 @@ main :: proc() {
 	ensure(arena_err == nil, "Buy more ram!")
 	arg_allocator := virtual.arena_allocator(&arg_arena)
 	main_loop: for !state.should_close {
+		spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, "cycle")
 		free_all(context.temp_allocator)
 		frame_buf := Buffer{}
 		{
@@ -242,6 +280,7 @@ main :: proc() {
 		}
 		should_cancel := false
 		if len(input) > 0 {
+			spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, "input handling")
 			{
 				tmp := in_buf
 				in_buf = processed_buf
@@ -253,6 +292,7 @@ main :: proc() {
 			append(in_buf, ..input[:])
 			state.cursor_offset = 0
 			edit_loop: for i := 0; i < len(in_buf); i += 1 {
+				spall.SCOPED_EVENT(&spall_ctx, &spall_buffer, "edit_loop")
 				ch := in_buf[i]
 				switch ch {
 				case '\b', '\x7f':
@@ -438,7 +478,7 @@ Error :: enum {
 	None,
 }
 get_builtin :: proc(cmd: string) -> (builtin_cmd: BuiltinCommand, ok: bool) {
-	for i in BuiltinCommand(0) ..< max(BuiltinCommand) {
+	for i in BuiltinCommand(0) ..= max(BuiltinCommand) {
 		builtin_cmd = i
 		if cmd == builtin_commands[i] {
 			ok = true
@@ -605,8 +645,10 @@ import "core:mem"
 import "core:mem/virtual"
 import "core:os"
 import "core:path/filepath"
+import "core:prof/spall"
 import "core:strconv"
 import "core:strings"
+import "core:sync"
 import "core:sys/linux"
 import "core:sys/posix"
 import "core:terminal"
