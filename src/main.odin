@@ -383,9 +383,21 @@ mush_execute :: proc(args: [dynamic][]u8) -> (err: Error) {
 			when ODIN_DEBUG {
 				context.allocator = runtime.default_allocator()
 			}
+			argc := make([^]cstring, len(args))
+			for arg, i in args {
+				argc[i] = strings.clone_to_cstring(string(arg))
+			}
+			executable := argc[0]
 			// restore_modes()
-			argczero, argc := make_c_strings(args)
-			ret := linux.execve(argczero, argc, posix.environ)
+			execpath, err_path := filepath.abs(string(args[0]))
+			if err_path == nil {
+				executable = strings.clone_to_cstring(execpath)
+			} else {
+				path_cstr := posix.getenv("PATH")
+			}
+
+
+			ret := linux.execve(executable, argc, posix.environ)
 			if ret != nil {
 				fmt.eprintfln("Command not found: %s", args[0])
 			}
@@ -413,39 +425,6 @@ mush_cd :: proc(args: [dynamic][]u8) {
 		_, argc := make_c_strings(args)
 		posix.chdir(cast(cstring)argc[1])
 	}
-}
-
-make_c_strings :: proc(
-	tokens: [dynamic][]u8,
-	allocator := context.allocator,
-) -> (
-	cstring,
-	[^]cstring,
-) {
-	arena_backing := make([]u8, 4 * mem.Kilobyte)
-	arena: mem.Arena
-	mem.arena_init(&arena, arena_backing)
-	arena_allocator := mem.arena_allocator(&arena)
-
-	// Allocate array of cstrings (with extra slot for nil terminator)
-	c_args := make([]cstring, len(tokens) + 1, arena_allocator)
-
-	// Convert each token to null-terminated C string
-	for token, i in tokens {
-		// Create null-terminated copy
-		nt_token := make([]u8, len(token) + 1, arena_allocator)
-		copy(nt_token, token)
-		nt_token[len(token)] = 0 // Null terminator
-
-		// Store as cstring
-		c_args[i] = cstring(raw_data(nt_token))
-	}
-
-	// Last element must be nil
-	c_args[len(tokens)] = nil
-
-	// Return the command and arguments
-	return c_args[0], raw_data(c_args)
 }
 @(disabled = ODIN_DISABLE_ASSERT)
 wassert :: proc(
@@ -507,6 +486,7 @@ import "core:log"
 import "core:mem"
 import "core:mem/virtual"
 import "core:os"
+import "core:path/filepath"
 import "core:strconv"
 import "core:strings"
 import "core:sys/linux"
